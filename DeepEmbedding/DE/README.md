@@ -1,1 +1,1 @@
-# Deep Recursive Embedding
+# Deep Embedding

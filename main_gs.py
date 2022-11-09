@@ -52,7 +52,7 @@ def cluster_manifold_in_embedding(hl, y, label_names=None):
         random_shuffle=False,
         n_components=args.n_components,
         dataset_name=args.dataset,
-        tsne_perplexity=30.00,
+        tsne_perplexity=30.0,
         umap_n_neighbors=args.umap_neighbors,
         min_dist=md,
         batch_size=args.batch_size,
@@ -63,9 +63,8 @@ def cluster_manifold_in_embedding(hl, y, label_names=None):
         plot_init = True,
         load_weight_emb=args.load_weight_emb,
         )
-    hle = de.fit_transform(hl)/100
-    # hle = StandardScaler(with_mean=False).fit_transform(hle)
-    # clustering on new manifold of autoencoded embedding
+    hle = de.fit_transform(hl)
+
     if args.cluster == 'GMM':
         gmm = mixture.GaussianMixture(
             covariance_type='full',
@@ -88,14 +87,11 @@ def cluster_manifold_in_embedding(hl, y, label_names=None):
             affinity='nearest_neighbors')
         y_pred = sc.fit_predict(hle)
     elif args.cluster == 'GS':
-        if args.h == 0.00:
-            h = get_h(hle,y)
-        else:
-            h = args.h
+
+        h, knn_idx, knn_dist, rho, core_card = est_h(hle,args.p)
         gs = GridShiftPP(bandwidth=h, iterations=200)
         y_pred, centers = gs.fit_predict(hle)
         y_pred, centers = get_reduce_noise(hle, y_pred, centers)
-
 
         
 
@@ -112,6 +108,9 @@ def cluster_manifold_in_embedding(hl, y, label_names=None):
     print(ari)
     print(dbi)
     print(y_pred.max()+1)
+    print(h)
+    print(args.p)
+    print(args.tol)
     print('=' * 80)
 
     if args.visualize:
@@ -143,6 +142,33 @@ def cluster_acc(y_true, y_pred):
     _, ind, w = best_cluster_fit(y_true, y_pred)
     return sum([w[i, j] for i, j in ind]) * 1.0 / y_pred.size
 
+
+
+def est_h(X,p):
+    nb_el = len(X)
+    effective_nb_el = int(nb_el / 14)
+    # Use kNN to get neighbours + idx
+    vectors = X.astype(np.float32)
+    nbrs = NearestNeighbors(n_neighbors=effective_nb_el, algorithm="auto", n_jobs=1, metric='chebyshev').fit(vectors)
+    knn_dist, knn_idx = nbrs.kneighbors(vectors)
+    knn_dist = knn_dist.astype(np.float32)
+    knn_idx = knn_idx.astype(np.int32)
+
+    # Get Gaussian sigma for local density based on neighbour matrix
+    position = int(round(nb_el ** 2 * p* 0.01))
+    if position >= np.prod(knn_dist.shape):
+        position = -1
+    dc = np.sort(knn_dist.flatten())[position]
+    ordered_knn_dens = np.exp(-1 * np.square(knn_dist / dc))
+
+    summed_okd = ordered_knn_dens.cumsum(axis=1) - 1
+    rho = summed_okd[:, -1].copy()
+  
+    summed_okd /= int(round(p * 0.01 * nb_el))
+
+    core_card = np.unravel_index(np.argmax(summed_okd > ordered_knn_dens, axis=1), summed_okd.shape)[1]
+    return dc, knn_idx, knn_dist, rho, core_card
+
 def get_reduce_noise(X, labels, centers):
     max_cluster_id = labels.max() + 1
     k = 0
@@ -169,30 +195,8 @@ def get_reduce_noise(X, labels, centers):
         return labels_new, centers_new
     else:
         return labels, centers
-        
 
 
-def get_h(X,y):
-    study = opt.create_study(direction='maximize',pruner=opt.pruners.HyperbandPruner())
-    for i in range(1000):
-        trial = study.ask()
-        bw = trial.suggest_float("bw", 0.01,1)
-        GS = GridShiftPP(bandwidth=bw, iterations = 200)
-        assignment_new, U = GS.fit_predict(X)
-        assignment_new, U = get_reduce_noise(X, assignment_new, U)
-        # if assignment_new.max()==0:
-        #     aa = 0.00
-        # else:
-        #     # aa = silhouette_score(X.astype(np.double),assignment_new)
-        #     aa = validity_index(X.astype(np.double), assignment_new)
-        # aa = np.round(metrics.normalized_mutual_info_score(y, assignment_new), 5)
-        aa = cluster_acc(y, assignment_new)
-        # aa = np.round(metrics.adjusted_rand_score(y, assignment_new), 5)
-        if math.isnan(aa):
-            aa = -10**10
-        study.tell(trial, aa)
-        print('%1f:-> %s, value:%1.16f\n\r' %(i,study.best_params, study.best_value))
-    return np.array(np.array(study.best_params["bw"]))
 
 
 def plot(x, y, plot_id, names=None):
@@ -243,41 +247,20 @@ if __name__ == "__main__":
     parser.add_argument('--cluster', default='KM', type=str)
     parser.add_argument('--visualize', default=False, action='store_true')
     parser.add_argument('--load_weight_emb', default=False, action='store_true')
-    parser.add_argument('--h', default=0.00, type=float)
+    parser.add_argument('--p', default=4.00, type=float)
+
     args = parser.parse_args()
     torch.cuda.set_device(args.gpu)
     args.device = f'cuda:{args.gpu}' if torch.cuda.is_available() else 'cpu'
     print(args)
 
     
-    from datasets import load_mnist, load_mnist_test, load_usps, load_pendigits, load_fashion, load_har, load_cifar_10, load_emnist_by, load_stl10, load_imagenet50, load_cifar_100
-    from datasets import load_reuters
+    from datasets import load_mnist
 
     label_names = None
     if args.dataset == 'mnist':
         x, y = load_mnist()
-    elif args.dataset == 'mnist-test':
-        x, y = load_mnist_test()
-    elif args.dataset == 'usps':
-        x, y = load_usps()
-    elif args.dataset == 'pendigits':
-        x, y = load_pendigits()
-    elif args.dataset == 'fashion':
-        x, y, label_names = load_fashion()
-    elif args.dataset == 'har':
-        x, y, label_names = load_har()
-    elif args.dataset == 'byclass':
-        x, y = load_emnist_by()
-    elif args.dataset == 'cifar10':
-        x, y = load_cifar_10()
-    elif args.dataset == 'cifar100':
-        x, y = load_cifar_100()
-    elif args.dataset == 'stl10':
-        x, y = load_stl10()
-    elif args.dataset == 'imagenet50':
-        x, y = load_imagenet50()
-    elif args.dataset == 'reuters':
-        x, y = load_reuters()
+
 
    
 
