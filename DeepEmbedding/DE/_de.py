@@ -27,7 +27,7 @@ from ._utils_de import *
 class DeepEmbedding:
     """
     ****** Deep Embedding implementation (PyTorch). ******
-    Author: Abhishek Kumar
+    Author: .......
     Version: 1.0.0
     Date: 2022/09/24
 
